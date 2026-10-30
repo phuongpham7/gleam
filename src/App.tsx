@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { classify, type Bucket } from "../server/classify";
 
 type Item = {
@@ -10,6 +10,7 @@ type Item = {
   reframed?: string;
 };
 type Tab = "all" | Exclude<Bucket, "neutral">;
+type View = "creator" | "raw" | "sorted";
 
 const SAMPLES: [string, string][] = [
   ["maya", "Your audio is trash, I can’t hear anything"],
@@ -23,13 +24,31 @@ const SAMPLES: [string, string][] = [
   ["rue", "The lighting is bad in the second half"],
   ["tess", "Thank you for explaining this so clearly"],
 ];
-const TABS: [Tab, string][] = [
-  ["all", "All comments"],
-  ["praise", "Praise"],
-  ["constructive", "Feedback"],
-  ["held", "Held back"],
-  ["escalated", "Needs review"],
+const TABS: [Tab, string, string][] = [
+  ["all", "All", "💬"],
+  ["praise", "Praise", "💚"],
+  ["constructive", "Feedback", "💡"],
+  ["held", "Held back", "🚫"],
+  ["escalated", "Review", "⚠️"],
 ];
+const HIDDEN: Bucket[] = ["held", "escalated"];
+
+function Avatar({ name, size = 36 }: { name: string; size?: number }) {
+  const hue = [...name].reduce((a, c) => a + c.charCodeAt(0), 0) % 360;
+  return (
+    <span
+      className="av"
+      style={{
+        width: size,
+        height: size,
+        fontSize: size * 0.42,
+        background: `hsl(${hue} 50% 52%)`,
+      }}
+    >
+      {(name[0] ?? "?").toUpperCase()}
+    </span>
+  );
+}
 
 function ThankCard({ name, quote }: { name: string; quote: string }) {
   return (
@@ -59,54 +78,57 @@ function ThankCard({ name, quote }: { name: string; quote: string }) {
   );
 }
 
-function Reveal({ text, label }: { text: string; label: string }) {
+function Comment({ i, raw }: { i: Item; raw: boolean }) {
+  const [liked, setLiked] = useState(false);
   const [open, setOpen] = useState(false);
+  const changed =
+    !raw && (i.bucket === "constructive" || HIDDEN.includes(i.bucket));
+  let shown = i.text;
+  if (changed && !open) {
+    shown =
+      i.bucket === "constructive"
+        ? (i.reframed ?? i.text)
+        : i.bucket === "held"
+          ? `Hidden by Glimmer (${i.label})`
+          : "Possible threat. Review it and report it if needed.";
+  }
+  const toggle = open
+    ? "Hide original"
+    : i.bucket === "constructive"
+      ? "See original"
+      : "Show anyway";
   return (
-    <>
-      <button className="link" onClick={() => setOpen(!open)}>
-        {open ? "Hide" : label}
-      </button>
-      {open && <div className="meta">{text}</div>}
-    </>
-  );
-}
-
-function CreatorBody({ i }: { i: Item }) {
-  if (i.bucket === "constructive")
-    return (
-      <>
-        <div className="sug">{i.reframed}</div>
-        <Reveal text={i.text} label="Show original" />
-      </>
-    );
-  if (i.bucket === "held")
-    return (
-      <>
-        <div className="meta">Hidden from your view ({i.label}).</div>
-        <Reveal text={i.text} label="Show anyway" />
-      </>
-    );
-  if (i.bucket === "escalated")
-    return (
-      <>
-        <div className="sug">
-          Possible threat. Review it and report it if needed.
+    <li className={`cm ${i.bucket}`}>
+      <Avatar name={i.author} />
+      <div className="cb">
+        <p>
+          <b>{i.author}</b>{" "}
+          <span className={changed && !open ? "mod" : ""}>{shown}</span>
+        </p>
+        <div className="act">
+          <span>now</span>
+          <button>Reply</button>
+          {changed && <button onClick={() => setOpen(!open)}>{toggle}</button>}
+          {raw && <span className="tag">{i.label}</span>}
         </div>
-        <Reveal text={i.text} label="Show original" />
-      </>
-    );
-  return (
-    <>
-      <div>{i.text}</div>
-      {i.bucket === "praise" && <ThankCard name={i.author} quote={i.text} />}
-    </>
+        {i.bucket === "praise" && <ThankCard name={i.author} quote={i.text} />}
+      </div>
+      <button
+        className="heart"
+        aria-pressed={liked}
+        aria-label="Like"
+        onClick={() => setLiked(!liked)}
+      >
+        {liked ? "♥" : "♡"}
+      </button>
+    </li>
   );
 }
 
 export default function App() {
   const [items, setItems] = useState<Item[]>([]);
   const [tab, setTab] = useState<Tab>("all");
-  const [view, setView] = useState<"creator" | "raw" | "sorted">("creator");
+  const [view, setView] = useState<View>("creator");
   const [author, setAuthor] = useState("viewer42");
   const [text, setText] = useState("");
   const [live, setLive] = useState(false);
@@ -150,162 +172,169 @@ export default function App() {
     return () => clearInterval(h);
   }, [live]);
 
+  function submit(e: FormEvent) {
+    e.preventDefault();
+    const t = text.trim();
+    if (!t) return;
+    add(author.trim() || "anonymous", t);
+    setText("");
+  }
+
   const count = (k: Tab) =>
     k === "all" ? items.length : items.filter((i) => i.bucket === k).length;
   let list = items.filter((i) => tab === "all" || i.bucket === tab);
   let hidden = 0;
   if (view === "creator" && tab === "all") {
-    hidden = list.filter(
-      (i) => i.bucket === "held" || i.bucket === "escalated",
-    ).length;
-    list = list.filter((i) => i.bucket !== "held" && i.bucket !== "escalated");
+    hidden = list.filter((i) => HIDDEN.includes(i.bucket)).length;
+    list = list.filter((i) => !HIDDEN.includes(i.bucket));
   }
 
   return (
-    <main className={view === "sorted" ? "wide" : undefined}>
-      <h1>Gleam</h1>
-      <p className="sub">
-        Your comments, sorted before you see them. Abuse is held back, harsh
-        feedback becomes something you can use, and fans who cheer you on get a
-        thank-you card.
-      </p>
-
-      <section className="panel" aria-label="Add a comment">
-        <div className="grid">
-          <div>
-            <label htmlFor="au">Viewer name</label>
-            <input
-              id="au"
-              value={author}
-              onChange={(e) => setAuthor(e.target.value)}
-            />
-          </div>
-          <div>
-            <label htmlFor="tx">Comment</label>
-            <input
-              id="tx"
-              value={text}
-              placeholder="Try: Your audio is trash"
-              onChange={(e) => setText(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && text.trim()) {
-                  add(author || "anonymous", text.trim());
-                  setText("");
-                }
-              }}
-            />
-          </div>
+    <>
+      <header className="top">
+        <div className="top-in">
+          <span className="logo">Gleam</span>
         </div>
-        <div className="row">
-          <button
-            onClick={() => {
-              if (text.trim()) {
-                add(author || "anonymous", text.trim());
-                setText("");
-              }
-            }}
-          >
-            Post comment
-          </button>
-          <button
-            className={live ? "on" : "ghost"}
-            aria-pressed={live}
-            onClick={() => setLive(!live)}
-          >
-            {live ? "Stop live stream" : "Start live stream"}
-          </button>
-          <div className="seg" role="group" aria-label="What you see">
-            <button
-              aria-pressed={view === "creator"}
-              onClick={() => setView("creator")}
-            >
-              Creator view
-            </button>
-            <button
-              aria-pressed={view === "raw"}
-              onClick={() => setView("raw")}
-            >
-              Raw view
-            </button>
-            <button
-              aria-pressed={view === "sorted"}
-              onClick={() => setView("sorted")}
-            >
-              Sorted
-            </button>
-          </div>
-        </div>
-      </section>
-
-      <div className="stats" hidden={view === "sorted"}>
-        {TABS.map(([k, v]) => (
-          <button
-            key={k}
-            className="stat"
-            aria-pressed={tab === k}
-            onClick={() => setTab(k)}
-          >
-            <b>{count(k)}</b>
-            <span>{v}</span>
-          </button>
-        ))}
-      </div>
-
-      {view === "sorted" ? (
-        <section className="board" aria-live="polite">
-          {TABS.slice(1).map(([k, v]) => (
-            <div key={k} className="col">
-              <h2>
-                {v} <span className="tag">{count(k)}</span>
-              </h2>
-              {count(k) === 0 && <p className="empty">None yet</p>}
-              {items
-                .filter((i) => i.bucket === k)
-                .map((i) => (
-                  <article key={i.id} className={`item ${i.bucket}`}>
-                    <div className="meta">{i.author}</div>
-                    <CreatorBody i={i} />
-                  </article>
-                ))}
+      </header>
+      <main className={view === "sorted" ? "wide" : undefined}>
+        <section className="profile">
+          <span className="ring">
+            <Avatar name="G" size={86} />
+          </span>
+          <div className="pinfo">
+            <div className="prow">
+              <h1>your_channel</h1>
+              <button
+                className={`btn live${live ? " on" : ""}`}
+                aria-pressed={live}
+                onClick={() => setLive(!live)}
+              >
+                {live ? "● Live now · End" : "Go live"}
+              </button>
             </div>
-          ))}
+            <ul className="stats2">
+              <li>
+                <b>{items.length}</b> comments
+              </li>
+              <li>
+                <b>{count("held") + count("escalated")}</b> hidden
+              </li>
+              <li>
+                <b>{count("praise")}</b> thank-yous
+              </li>
+            </ul>
+            <p className="bio">
+              <b>Gleam</b>
+              <br />
+              <span>
+                Comments sorted before you see them. Abuse is held back,
+                feedback is made usable.
+              </span>
+            </p>
+          </div>
         </section>
-      ) : (
-        <section aria-live="polite">
-          {hidden > 0 && (
-            <p className="note">
-              {hidden} comment{hidden > 1 ? "s" : ""} hidden by Glimmer. Open
-              Held back or Needs review to look.
-            </p>
-          )}
-          {list.length === 0 && (
-            <p className="empty">
-              Nothing here yet. Post a comment or start the live stream.
-            </p>
-          )}
-          {list.map((i) => (
-            <article key={i.id} className={`item ${i.bucket}`}>
-              <div className="meta">
-                {i.author}
-                {view === "raw" && <span className="tag">{i.label}</span>}
+
+        <nav
+          className="hls"
+          aria-label="Filter comments"
+          hidden={view === "sorted"}
+        >
+          {TABS.map(([k, v, icon]) => (
+            <button
+              key={k}
+              className="hl"
+              aria-pressed={tab === k}
+              onClick={() => setTab(k)}
+            >
+              <span className="hlc">
+                <span>{icon}</span>
+              </span>
+              <small>
+                {v} {count(k)}
+              </small>
+            </button>
+          ))}
+        </nav>
+
+        <div className="tabs" role="group" aria-label="What you see">
+          {(
+            [
+              ["creator", "Creator view"],
+              ["raw", "Raw view"],
+              ["sorted", "Sorted"],
+            ] as [View, string][]
+          ).map(([k, v]) => (
+            <button
+              key={k}
+              aria-pressed={view === k}
+              onClick={() => setView(k)}
+            >
+              {v}
+            </button>
+          ))}
+        </div>
+
+        {view === "sorted" ? (
+          <section className="board" aria-live="polite">
+            {TABS.slice(1).map(([k, v]) => (
+              <div key={k} className="col">
+                <h2>
+                  {v} · {count(k as Tab)}
+                </h2>
+                {count(k as Tab) === 0 && <p className="mut">None yet</p>}
+                <ul className="cl">
+                  {items
+                    .filter((i) => i.bucket === k)
+                    .map((i) => (
+                      <Comment key={i.id} i={i} raw={false} />
+                    ))}
+                </ul>
               </div>
-              {view === "raw" ? (
-                <>
-                  <div>{i.text}</div>
-                  {i.bucket === "praise" && (
-                    <ThankCard name={i.author} quote={i.text} />
-                  )}
-                </>
-              ) : (
-                <CreatorBody i={i} />
-              )}
-            </article>
-          ))}
-        </section>
-      )}
-      <p className="foot">
-        Without META_API_KEY, sorting uses built-in rules on the server.
-      </p>
-    </main>
+            ))}
+          </section>
+        ) : (
+          <section aria-live="polite">
+            {hidden > 0 && (
+              <p className="note">
+                {hidden} comment{hidden > 1 ? "s" : ""} hidden by Glimmer. Open
+                “Held back” or “Review” to look.
+              </p>
+            )}
+            {list.length === 0 && hidden === 0 && (
+              <p className="empty">
+                No comments yet. Add one below or tap “Go live”.
+              </p>
+            )}
+            <ul className="cl">
+              {list.map((i) => (
+                <Comment key={i.id} i={i} raw={view === "raw"} />
+              ))}
+            </ul>
+          </section>
+        )}
+
+        <form className="composer" onSubmit={submit}>
+          <input
+            className="nm"
+            value={author}
+            onChange={(e) => setAuthor(e.target.value)}
+            aria-label="Viewer name"
+          />
+          <input
+            className="tx"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder="Add a comment…"
+            aria-label="Comment"
+          />
+          <button className="post" disabled={!text.trim()}>
+            Post
+          </button>
+        </form>
+        <p className="foot">
+          Without META_API_KEY, sorting uses built-in rules.
+        </p>
+      </main>
+    </>
   );
 }
