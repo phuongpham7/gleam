@@ -8,9 +8,10 @@ type Item = {
   label: string;
   bucket: Bucket;
   reframed?: string;
+  card?: string;
 };
 type Tab = "all" | Exclude<Bucket, "neutral">;
-type View = "creator" | "raw" | "sorted";
+type View = "creator" | "raw" | "sorted" | "eval";
 
 const SAMPLES: [string, string][] = [
   ["maya", "Your audio is trash, I can’t hear anything"],
@@ -50,30 +51,73 @@ function Avatar({ name, size = 36 }: { name: string; size?: number }) {
   );
 }
 
-function ThankCard({ name, quote }: { name: string; quote: string }) {
+function ThankCard({
+  id,
+  name,
+  quote,
+  card,
+}: {
+  id: number;
+  name: string;
+  quote: string;
+  card?: string;
+}) {
+  const [img, setImg] = useState(card);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  async function make() {
+    setBusy(true);
+    setErr("");
+    try {
+      const r = await fetch(`/api/comments/${id}/card`, { method: "POST" });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || String(r.status));
+      setImg(d.card);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
   return (
-    <div className="card">
-      <svg
-        viewBox="0 0 400 200"
-        role="img"
-        aria-label={`Thank-you card for ${name}`}
-      >
-        <rect width="400" height="200" fill="#2F7D6B" />
-        <text
-          x="22"
-          y="56"
-          fontSize="26"
-          fill="#fff"
-          fontFamily="Georgia,serif"
-        >
-          Thank you, {name}
-        </text>
-        <foreignObject x="22" y="76" width="356" height="110">
-          <div style={{ color: "#E6F2EE", font: "16px Georgia,serif" }}>
-            “{quote.slice(0, 90)}”
-          </div>
-        </foreignObject>
-      </svg>
+    <div className="cardwrap">
+      <div className="card">
+        {img ? (
+          <img src={img} alt={`Thank-you card for ${name}`} />
+        ) : (
+          <svg
+            viewBox="0 0 400 200"
+            role="img"
+            aria-label={`Thank-you card for ${name}`}
+          >
+            <rect width="400" height="200" fill="#2F7D6B" />
+            <text
+              x="22"
+              y="56"
+              fontSize="26"
+              fill="#fff"
+              fontFamily="Georgia,serif"
+            >
+              Thank you, {name}
+            </text>
+            <foreignObject x="22" y="76" width="356" height="110">
+              <div style={{ color: "#E6F2EE", font: "16px Georgia,serif" }}>
+                “{quote.slice(0, 90)}”
+              </div>
+            </foreignObject>
+          </svg>
+        )}
+      </div>
+      <div className="act">
+        <button disabled={busy} onClick={make}>
+          {busy
+            ? "Creating…"
+            : img
+              ? "Redo with Muse Image"
+              : "Create with Muse Image"}
+        </button>
+        {err && <span className="err">{err}</span>}
+      </div>
     </div>
   );
 }
@@ -111,7 +155,9 @@ function Comment({ i, raw }: { i: Item; raw: boolean }) {
           {changed && <button onClick={() => setOpen(!open)}>{toggle}</button>}
           {raw && <span className="tag">{i.label}</span>}
         </div>
-        {i.bucket === "praise" && <ThankCard name={i.author} quote={i.text} />}
+        {i.bucket === "praise" && (
+          <ThankCard id={i.id} name={i.author} quote={i.text} card={i.card} />
+        )}
       </div>
       <button
         className="heart"
@@ -125,6 +171,191 @@ function Comment({ i, raw }: { i: Item; raw: boolean }) {
   );
 }
 
+const fromRow = (r: any): Item => ({
+  id: r.id,
+  author: r.author,
+  text: r.text,
+  label: r.label,
+  bucket: r.bucket,
+  reframed: r.reframed ?? undefined,
+  card: r.hasCard ? `/api/cards/${r.id}` : undefined,
+});
+
+// Meta's file endpoint wants mono 16-bit WAV at 16 kHz, so convert whatever the browser recorded.
+async function toWav(blob: Blob): Promise<Blob> {
+  const ctx = new AudioContext();
+  const buf = await ctx.decodeAudioData(await blob.arrayBuffer());
+  await ctx.close();
+  const off = new OfflineAudioContext(
+    1,
+    Math.ceil(buf.duration * 16000),
+    16000,
+  );
+  const src = off.createBufferSource();
+  src.buffer = buf;
+  src.connect(off.destination);
+  src.start();
+  const pcm = (await off.startRendering()).getChannelData(0);
+  const v = new DataView(new ArrayBuffer(44 + pcm.length * 2));
+  const w = (o: number, t: string) =>
+    [...t].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  w(0, "RIFF");
+  v.setUint32(4, 36 + pcm.length * 2, true);
+  w(8, "WAVEfmt ");
+  v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true);
+  v.setUint16(22, 1, true);
+  v.setUint32(24, 16000, true);
+  v.setUint32(28, 32000, true);
+  v.setUint16(32, 2, true);
+  v.setUint16(34, 16, true);
+  w(36, "data");
+  v.setUint32(40, pcm.length * 2, true);
+  pcm.forEach((x, i) =>
+    v.setInt16(44 + i * 2, Math.max(-1, Math.min(1, x)) * 0x7fff, true),
+  );
+  return new Blob([v], { type: "audio/wav" });
+}
+
+function Mic({
+  onText,
+  onError,
+}: {
+  onText: (t: string) => void;
+  onError: (m: string) => void;
+}) {
+  const [state, setState] = useState<"idle" | "rec" | "busy">("idle");
+  const rec = useRef<MediaRecorder | null>(null);
+  async function toggle() {
+    if (state === "rec") {
+      rec.current?.stop();
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mr = new MediaRecorder(stream);
+      const chunks: Blob[] = [];
+      mr.ondataavailable = (e) => chunks.push(e.data);
+      mr.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        setState("busy");
+        try {
+          const r = await fetch("/api/transcribe", {
+            method: "POST",
+            headers: { "Content-Type": "audio/wav" },
+            body: await toWav(new Blob(chunks)),
+          });
+          const d = await r.json();
+          if (!r.ok) throw new Error(d.error || String(r.status));
+          onText(d.text);
+        } catch (e) {
+          onError((e as Error).message);
+        }
+        setState("idle");
+      };
+      mr.start();
+      rec.current = mr;
+      setState("rec");
+    } catch {
+      onError("Microphone not available");
+    }
+  }
+  return (
+    <button
+      type="button"
+      className={`mic ${state}`}
+      onClick={toggle}
+      disabled={state === "busy"}
+      aria-label="Record a voice comment"
+    >
+      {state === "rec" ? "■" : state === "busy" ? "…" : "🎤"}
+    </button>
+  );
+}
+
+type EvalRes = {
+  total: number;
+  rules: { correct: number };
+  model: { correct: number; failed: number } | null;
+  cases: {
+    text: string;
+    expected: string;
+    rules: string;
+    model: string | null;
+  }[];
+};
+function Evaluation() {
+  const [res, setRes] = useState<EvalRes | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  async function run() {
+    setBusy(true);
+    setErr("");
+    try {
+      const r = await fetch("/api/eval", { method: "POST" });
+      if (!r.ok) throw new Error("Server not reachable (" + r.status + ")");
+      setRes(await r.json());
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  const pct = (n: number) => `${Math.round((n / res!.total) * 100)}%`;
+  const misses =
+    res?.cases.filter(
+      (c) =>
+        c.rules !== c.expected || (c.model !== null && c.model !== c.expected),
+    ) ?? [];
+  return (
+    <section className="eval">
+      <p className="mut">
+        Sorts a set of hand-labeled comments and checks each result against the
+        expected category.
+      </p>
+      <button className="btn live" onClick={run} disabled={busy}>
+        {busy ? "Running…" : "Run accuracy test"}
+      </button>
+      {err && <p className="err">{err}</p>}
+      {res && (
+        <>
+          <div className="scores">
+            <div>
+              <b>{pct(res.rules.correct)}</b>
+              <span>
+                Built-in rules · {res.rules.correct}/{res.total}
+              </span>
+            </div>
+            <div>
+              <b>{res.model ? pct(res.model.correct) : "n/a"}</b>
+              <span>
+                {res.model
+                  ? `Muse Spark · ${res.model.correct}/${res.total}${res.model.failed ? ` (${res.model.failed} calls failed)` : ""}`
+                  : "Muse Spark · no API key"}
+              </span>
+            </div>
+          </div>
+          <h3>Misses ({misses.length})</h3>
+          <ul className="cl">
+            {misses.map((c, i) => (
+              <li key={i} className="miss">
+                <p>“{c.text}”</p>
+                <div className="act">
+                  <span>
+                    expected <b>{c.expected}</b>
+                  </span>
+                  <span>rules: {c.rules}</span>
+                  {res.model && <span>Spark: {c.model ?? "failed"}</span>}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </section>
+  );
+}
+
 export default function App() {
   const [items, setItems] = useState<Item[]>([]);
   const [tab, setTab] = useState<Tab>("all");
@@ -132,34 +363,45 @@ export default function App() {
   const [author, setAuthor] = useState("viewer42");
   const [text, setText] = useState("");
   const [live, setLive] = useState(false);
+  const [note, setNote] = useState("");
   const idRef = useRef(0);
   const sampleRef = useRef(0);
 
   async function add(a: string, t: string) {
-    let r: { label: string; bucket: Bucket; reframed?: string };
+    let item: Item;
     try {
       const res = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: t }),
+        body: JSON.stringify({ text: t, author: a }),
       });
       if (!res.ok) throw new Error(String(res.status));
-      r = await res.json();
+      item = fromRow(await res.json());
     } catch {
-      r = classify(t); // API server not running: sort in the browser instead
-    }
-    setItems((prev) => [
-      {
-        id: ++idRef.current,
+      const r = classify(t); // server not running: sort in the browser (not saved)
+      item = {
+        id: -++idRef.current,
         author: a,
         text: t,
         label: r.label,
         bucket: r.bucket,
         reframed: r.reframed,
-      },
-      ...prev,
-    ]);
+      };
+    }
+    setItems((prev) => [item, ...prev]);
   }
+
+  async function clearAll() {
+    await fetch("/api/comments", { method: "DELETE" }).catch(() => {});
+    setItems([]);
+  }
+
+  useEffect(() => {
+    fetch("/api/comments")
+      .then((r) => r.json())
+      .then((rows) => setItems(rows.map(fromRow)))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (!live) return;
@@ -194,6 +436,7 @@ export default function App() {
       <header className="top">
         <div className="top-in">
           <span className="logo">Gleam</span>
+          <span className="mut">Creator dashboard</span>
         </div>
       </header>
       <main className={view === "sorted" ? "wide" : undefined}>
@@ -237,7 +480,7 @@ export default function App() {
         <nav
           className="hls"
           aria-label="Filter comments"
-          hidden={view === "sorted"}
+          hidden={view === "sorted" || view === "eval"}
         >
           {TABS.map(([k, v, icon]) => (
             <button
@@ -262,6 +505,7 @@ export default function App() {
               ["creator", "Creator view"],
               ["raw", "Raw view"],
               ["sorted", "Sorted"],
+              ["eval", "Accuracy"],
             ] as [View, string][]
           ).map(([k, v]) => (
             <button
@@ -274,7 +518,9 @@ export default function App() {
           ))}
         </div>
 
-        {view === "sorted" ? (
+        {view === "eval" ? (
+          <Evaluation />
+        ) : view === "sorted" ? (
           <section className="board" aria-live="polite">
             {TABS.slice(1).map(([k, v]) => (
               <div key={k} className="col">
@@ -313,7 +559,7 @@ export default function App() {
           </section>
         )}
 
-        <form className="composer" onSubmit={submit}>
+        <form className="composer" onSubmit={submit} hidden={view === "eval"}>
           <input
             className="nm"
             value={author}
@@ -327,12 +573,21 @@ export default function App() {
             placeholder="Add a comment…"
             aria-label="Comment"
           />
+          <Mic
+            onText={(t) => {
+              setText(t);
+              setNote("");
+            }}
+            onError={setNote}
+          />
           <button className="post" disabled={!text.trim()}>
             Post
           </button>
         </form>
+        {note && <p className="err">{note}</p>}
         <p className="foot">
-          Without META_API_KEY, sorting uses built-in rules.
+          Comments are saved in gleam.db. Without META_API_KEY, sorting uses
+          built-in rules. <button onClick={clearAll}>Clear all</button>
         </p>
       </main>
     </>

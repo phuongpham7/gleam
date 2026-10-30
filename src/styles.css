@@ -367,3 +367,74 @@ main.wide {
   text-align: center;
   margin: 18px 0 0;
 }
+.cardwrap {
+  margin-top: 8px;
+}
+.cardwrap .card {
+  margin-top: 0;
+}
+.card img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.err {
+  color: var(--red);
+  font-size: 0.8rem;
+  margin: 6px 0;
+}
+.mic {
+  font-size: 1.1rem;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+}
+.mic.rec {
+  background: var(--red);
+  color: #fff;
+  animation: pulse 1.2s infinite;
+}
+@keyframes pulse {
+  50% {
+    opacity: 0.55;
+  }
+}
+.foot button {
+  color: var(--mut);
+  text-decoration: underline;
+}
+.eval {
+  padding: 18px 0;
+}
+.eval h3 {
+  font-size: 0.95rem;
+  margin: 20px 0 4px;
+}
+.scores {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 16px;
+}
+.scores div {
+  background: var(--sf);
+  border: 1px solid var(--bd);
+  border-radius: 12px;
+  padding: 14px;
+}
+.scores b {
+  display: block;
+  font-size: 2rem;
+  line-height: 1.1;
+}
+.scores span {
+  color: var(--mut);
+  font-size: 0.8rem;
+}
+.miss {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--bd);
+}
+.miss p {
+  margin: 0;
+}
